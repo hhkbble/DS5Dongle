@@ -70,8 +70,8 @@ private:
     enum class PulsePhase : uint8_t { None, AwaitStart, Rising, Falling };
 
     void cancel_overlays();
-    void start_pulses();
-    uint8_t pulse_red(uint64_t now_us) const;
+    void start_pulses(uint8_t tier);
+    uint8_t pulse_intensity(uint64_t now_us) const;
 
     // Group timestamps to avoid padding between the always-resident fields.
     uint64_t candidate_since_us_ = 0;
@@ -108,7 +108,7 @@ private:
 
     PulsePhase pulse_phase_ = PulsePhase::None;
     uint8_t pulse_index_ = 0;
-    bool pulse_queued_ = false;
+    uint8_t notification_tier_ = 0;
 
     bool last_player_sent_ = false;
     uint8_t last_player_byte_ = 0;

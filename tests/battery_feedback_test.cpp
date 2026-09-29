@@ -43,11 +43,12 @@ static void initial_baseline_and_all_gauge_levels() {
         require(!feedback.output_at(200).player_override, "enable does not use an old cached report");
         feedback.on_real_battery_report(1, level, 300);
         const Output output = feedback.output_at(300);
-        const uint8_t expected[] = {1, 1, 1, 3, 3, 7, 7, 15, 15, 31, 31};
+        const uint8_t expected[] = {1, 1, 1, 3, 3, 3, 11, 11, 11, 27, 27};
         require(output.player_override, "first valid discharge report starts the gauge");
         require(output.player_byte == static_cast<uint8_t>(0x20 | expected[level]),
-                "gauge maps all raw levels to contiguous Player bits with instant mode");
-        require(!output.rgb_override, "first baseline never starts red notification");
+                "gauge maps all raw levels to four outer Player patterns");
+        require((output.player_byte & 0x04) == 0, "battery gauge never lights the center LED");
+        require(!output.rgb_override, "first baseline never starts a notification");
     }
 }
 
@@ -128,8 +129,105 @@ static void raw_transitions_and_retrigger_rules() {
     require(feedback.output_at(8'000'000).player_byte == 0x21,
             "raw level two maps to same gauge bit as one");
     confirmed_transition(feedback, 9, 1, 9'000'000);
-    require(feedback.output_at(12'000'000).rgb_override,
-            "raw two-to-one triggers despite unchanged gauge bit count");
+    require(!feedback.output_at(12'000'000).rgb_override,
+            "raw two-to-one stays in the same white tier and does not notify");
+    confirmed_transition(feedback, 9, 3, 13'000'000);
+    require(!feedback.output_at(16'000'000).rgb_override,
+            "rising from one to two white tiers does not notify");
+    confirmed_transition(feedback, 9, 2, 17'000'000);
+    require(feedback.output_at(20'000'000).rgb_override,
+            "confirmed two-to-one white-tier drop starts red notification");
+
+    BatteryFeedback zero;
+    zero.on_link_open(10);
+    zero.set_enabled(true, 0);
+    zero.on_real_battery_report(10, 3, 0);
+    confirmed_transition(zero, 10, 0, 1'000'000);
+    require(!zero.output_at(4'000'000).rgb_override,
+            "raw zero does not start a notification even when white tier falls");
+}
+
+static void tier_colors_and_skipped_tiers() {
+    struct ColorCase {
+        uint8_t from;
+        uint8_t to;
+        uint8_t red;
+        uint8_t green;
+        uint8_t blue;
+    };
+    const ColorCase color_cases[] = {
+        {9, 8, 0, 0, 255},      // 4 -> 3: blue.
+        {6, 5, 255, 255, 0},    // 3 -> 2: yellow.
+        {3, 2, 255, 0, 0},      // 2 -> 1: red.
+        {9, 5, 255, 255, 0},    // 4 -> 2: destination only.
+        {9, 2, 255, 0, 0},      // 4 -> 1: destination only.
+        {8, 1, 255, 0, 0},      // 3 -> 1: destination only.
+    };
+    for (const auto &test : color_cases) {
+        BatteryFeedback feedback;
+        feedback.on_link_open(1);
+        feedback.set_enabled(true, 0);
+        feedback.on_real_battery_report(1, test.from, 0);
+        confirmed_transition(feedback, 1, test.to, 1'000'000);
+        const Output first = feedback.output_at(4'000'000);
+        require(first.rgb_override && first.red == 0 && first.green == 0 &&
+                    first.blue == 0 && first.synthetic_due,
+                "confirmed white-tier drop requests a black pulse boundary");
+        accept(feedback, first, 4'000'000);
+        const Output peak = feedback.output_at(4'800'000);
+        require(peak.red == test.red && peak.green == test.green &&
+                    peak.blue == test.blue,
+                "pulse peak uses only the destination white tier's color");
+    }
+
+    const uint8_t same_tier[][2] = {{10, 9}, {8, 6}, {5, 3}, {2, 1}};
+    for (const auto &levels : same_tier) {
+        BatteryFeedback feedback;
+        feedback.on_link_open(2);
+        feedback.set_enabled(true, 0);
+        feedback.on_real_battery_report(2, levels[0], 0);
+        confirmed_transition(feedback, 2, levels[1], 1'000'000);
+        require(!feedback.output_at(4'000'000).rgb_override,
+                "raw level changes within one white tier do not notify");
+    }
+}
+
+static void five_delivery_gated_blue_and_yellow_pulses() {
+    struct ColorCase { uint8_t from, to, red, green, blue; };
+    const ColorCase cases[] = {{9, 8, 0, 0, 255}, {6, 5, 255, 255, 0}};
+    for (const auto &test : cases) {
+        BatteryFeedback feedback;
+        feedback.on_link_open(1);
+        feedback.observe_base_lights(LightCommand{false, 0, true, 20, 30, 40, false});
+        feedback.set_enabled(true, 0);
+        feedback.on_real_battery_report(1, test.from, 0);
+        confirmed_transition(feedback, 1, test.to, 1'000'000);
+        uint64_t now = 4'000'000;
+        accept(feedback, feedback.output_at(now), now);
+        for (uint8_t pulse = 0; pulse < 5; ++pulse) {
+            const Output peak = feedback.output_at(now + 800'000);
+            require(peak.rgb_override && peak.pulse_index == pulse &&
+                        peak.red == test.red && peak.green == test.green &&
+                        peak.blue == test.blue,
+                    "each colored pulse reaches its full target color");
+            SendResult rejected{};
+            feedback.on_send_result(peak, rejected, now + 800'000);
+            require(feedback.output_at(now + 1'000'000).pulse_index == pulse,
+                    "a rejected colored peak cannot advance the pulse");
+            accept(feedback, peak, now + 800'000);
+            const Output tail = feedback.output_at(now + 1'600'000);
+            require(tail.rgb_override && tail.red == 0 && tail.green == 0 &&
+                        tail.blue == 0,
+                    "each colored pulse ends at black");
+            accept(feedback, tail, now + 1'600'000);
+            now += 1'600'000;
+        }
+        const Output restore = feedback.output_at(now);
+        require(!restore.rgb_override && restore.rgb_restore &&
+                    restore.base_red == 20 && restore.base_green == 30 &&
+                    restore.base_blue == 40,
+                "five colored pulses hand RGB back to the latest host intent");
+    }
 }
 
 static void five_delivery_gated_pulses_and_natural_restore() {
@@ -178,38 +276,38 @@ static void five_delivery_gated_pulses_and_natural_restore() {
     require(!feedback.restore_pending(), "accepted RGB restoration finishes the sequence");
 }
 
-static void one_queued_episode_after_another_confirmed_edge() {
+static void later_confirmed_drop_restarts_the_running_episode() {
     BatteryFeedback feedback;
     feedback.on_link_open(12);
     feedback.set_enabled(true, 0);
-    feedback.on_real_battery_report(12, 3, 0);
-    confirmed_transition(feedback, 12, 1, 1'000'000);
+    feedback.on_real_battery_report(12, 9, 0);
+    confirmed_transition(feedback, 12, 8, 1'000'000);
     accept(feedback, feedback.output_at(4'000'000), 4'000'000);
-    // The first rising peak remains unaccepted while another real 2->1 edge is confirmed.
-    confirmed_transition(feedback, 12, 2, 5'000'000);
-    confirmed_transition(feedback, 12, 1, 8'001'000);
-    confirmed_transition(feedback, 12, 2, 11'100'000);
-    confirmed_transition(feedback, 12, 1, 14'101'000);
-    uint64_t now = 17'102'000;
-    for (uint8_t pulse = 0; pulse < 5; ++pulse) {
-        Output peak = feedback.output_at(now);
-        require(peak.rgb_override && peak.red == 255 && peak.pulse_index == pulse,
-                "queued edge does not interrupt current five-pulse episode");
-        accept(feedback, peak, now);
-        now += 800'000;
-        accept(feedback, feedback.output_at(now), now);
-        now += 800'000;
-    }
-    require(feedback.output_at(now).rgb_override && feedback.output_at(now).pulse_index == 0,
-            "one pending episode starts after five completed pulses");
-    for (uint8_t pulse = 0; pulse < 5; ++pulse) {
-        now += 800'000;
-        accept(feedback, feedback.output_at(now), now);
-        now += 800'000;
-        accept(feedback, feedback.output_at(now), now);
-    }
-    require(!feedback.output_at(now).rgb_override,
-            "multiple edges during one episode queue at most one more episode");
+    const Output first_peak = feedback.output_at(4'800'000);
+    require(first_peak.blue == 255,
+            "first blue episode is rising before a later edge");
+    accept(feedback, first_peak, 4'800'000);
+    confirmed_transition(feedback, 12, 9, 5'000'000);
+    confirmed_transition(feedback, 12, 8, 8'001'000);
+    const Output restart = feedback.output_at(11'001'000);
+    require(restart.rgb_override && restart.pulse_index == 0 &&
+                restart.red == 0 && restart.green == 0 && restart.blue == 0 &&
+                restart.synthetic_due,
+            "a second confirmed 4-to-3 drop restarts blue immediately at black");
+    accept(feedback, restart, 11'001'000);
+    require(feedback.output_at(11'801'000).blue == 255,
+            "the restarted episode reaches a fresh first blue peak");
+
+    confirmed_transition(feedback, 12, 5, 12'000'000);
+    const Output yellow = feedback.output_at(15'000'000);
+    require(yellow.rgb_override && yellow.pulse_index == 0 &&
+                yellow.red == 0 && yellow.green == 0 && yellow.blue == 0,
+            "new lower destination preempts blue with a fresh yellow episode");
+    accept(feedback, yellow, 15'000'000);
+    const Output yellow_peak = feedback.output_at(15'800'000);
+    require(yellow_peak.red == 255 && yellow_peak.green == 255 &&
+                yellow_peak.blue == 0,
+            "preempted episode uses the current destination color");
 }
 
 static void charging_disable_restore_and_generation() {
@@ -652,8 +750,10 @@ int main() {
     low_blink_and_silence_hold();
     raw_level_debounce_requires_later_matching_real_report();
     raw_transitions_and_retrigger_rules();
+    tier_colors_and_skipped_tiers();
     five_delivery_gated_pulses_and_natural_restore();
-    one_queued_episode_after_another_confirmed_edge();
+    five_delivery_gated_blue_and_yellow_pulses();
+    later_confirmed_drop_restarts_the_running_episode();
     charging_disable_restore_and_generation();
     cancel_before_first_accepted_output_does_not_disturb_lights();
     reset_lights_is_not_an_all_off_pattern();

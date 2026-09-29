@@ -6,6 +6,11 @@ constexpr uint64_t kConfirmUs = 3'000'000;
 constexpr uint64_t kBlinkUs = 500'000;
 constexpr uint64_t kPulseHalfUs = 800'000;
 constexpr uint64_t kRgbStepUs = 50'000;
+constexpr uint8_t kGaugeMasks[] = {0, 0x01, 0x03, 0x0b, 0x1b};
+
+constexpr uint8_t tier_for_level(uint8_t level) {
+    return level >= 9 ? 4 : level >= 6 ? 3 : level >= 3 ? 2 : 1;
+}
 
 uint64_t elapsed(uint64_t now_us, uint64_t since_us) {
     return now_us >= since_us ? now_us - since_us : 0;
@@ -31,7 +36,7 @@ void BatteryFeedback::on_link_closed(uint32_t generation) {
 void BatteryFeedback::cancel_overlays() {
     const bool changed = player_owned_ || rgb_owned_ || confirmed_valid_ ||
                          candidate_valid_ || pulse_phase_ != PulsePhase::None ||
-                         pulse_queued_ || reassert_player_ || reassert_rgb_;
+                         reassert_player_ || reassert_rgb_;
     if (changed) {
         restore_reset_sent_ = false;
     }
@@ -42,7 +47,7 @@ void BatteryFeedback::cancel_overlays() {
     confirmed_valid_ = false;
     candidate_valid_ = false;
     pulse_phase_ = PulsePhase::None;
-    pulse_queued_ = false;
+    notification_tier_ = 0;
     reassert_player_ = false;
     reassert_rgb_ = false;
 }
@@ -60,13 +65,10 @@ void BatteryFeedback::set_enabled(bool enabled, uint64_t now_us) {
     }
 }
 
-void BatteryFeedback::start_pulses() {
-    if (pulse_phase_ != PulsePhase::None) {
-        pulse_queued_ = true; // A single pending episode, regardless of more edges.
-        return;
-    }
+void BatteryFeedback::start_pulses(uint8_t tier) {
     pulse_phase_ = PulsePhase::AwaitStart;
     pulse_index_ = 0;
+    notification_tier_ = tier;
     reassert_rgb_ = true;
 }
 
@@ -109,7 +111,8 @@ void BatteryFeedback::on_real_battery_report(uint32_t generation, uint8_t raw,
     candidate_valid_ = false;
     if (level <= 2) low_phase_start_us_ = now_us;
     reassert_player_ = true;
-    if (previous > 1 && level == 1) start_pulses();
+    const uint8_t tier = tier_for_level(level);
+    if (level != 0 && tier < tier_for_level(previous)) start_pulses(tier);
 }
 
 bool BatteryFeedback::observe_base_lights(const LightCommand &command,
@@ -161,7 +164,7 @@ bool BatteryFeedback::observe_base_lights(const LightCommand &command,
     return changed;
 }
 
-uint8_t BatteryFeedback::pulse_red(uint64_t now_us) const {
+uint8_t BatteryFeedback::pulse_intensity(uint64_t now_us) const {
     switch (pulse_phase_) {
     case PulsePhase::AwaitStart:
         return 0;
@@ -194,16 +197,24 @@ Output BatteryFeedback::output_at(uint64_t now_us) const {
 
     output.player_override = enabled_ && confirmed_valid_;
     if (output.player_override) {
-        const uint8_t bars = static_cast<uint8_t>((confirmed_level_ + 1) / 2);
-        const uint8_t mask = bars <= 1
+        const uint8_t tier = tier_for_level(confirmed_level_);
+        const uint8_t mask = tier == 1
             ? (elapsed(now_us, low_phase_start_us_) % kBlinkUs < kBlinkUs / 2 ? 1 : 0)
-            : static_cast<uint8_t>((1u << bars) - 1u);
+            : kGaugeMasks[tier];
         output.player_byte = static_cast<uint8_t>(0x20 | mask);
     }
 
     output.rgb_override = enabled_ && pulse_phase_ != PulsePhase::None;
     if (output.rgb_override) {
-        output.red = pulse_red(now_us);
+        const uint8_t intensity = pulse_intensity(now_us);
+        if (notification_tier_ == 3) {
+            output.blue = intensity;
+        } else if (notification_tier_ == 2) {
+            output.red = intensity;
+            output.green = intensity;
+        } else {
+            output.red = intensity;
+        }
         output.pulse_index = pulse_index_;
         output.pulse_phase = static_cast<uint8_t>(pulse_phase_);
     }
@@ -293,21 +304,19 @@ void BatteryFeedback::on_send_result(const Output &sent, const SendResult &resul
     if (pulse_phase_ == PulsePhase::AwaitStart) {
         pulse_phase_ = PulsePhase::Rising;
         pulse_phase_since_us_ = now_us;
-    } else if (pulse_phase_ == PulsePhase::Rising && sent.red == 255) {
+    } else if (pulse_phase_ == PulsePhase::Rising &&
+               (sent.red | sent.green | sent.blue) == 255) {
         pulse_phase_ = PulsePhase::Falling;
         pulse_phase_since_us_ = now_us;
-    } else if (pulse_phase_ == PulsePhase::Falling && sent.red == 0) {
+    } else if (pulse_phase_ == PulsePhase::Falling &&
+               (sent.red | sent.green | sent.blue) == 0) {
         if (pulse_index_ < 4) {
             ++pulse_index_;
             pulse_phase_ = PulsePhase::Rising;
             pulse_phase_since_us_ = now_us;
-        } else if (pulse_queued_) {
-            pulse_queued_ = false;
-            pulse_index_ = 0;
-            pulse_phase_ = PulsePhase::Rising;
-            pulse_phase_since_us_ = now_us;
         } else {
             pulse_phase_ = PulsePhase::None;
+            notification_tier_ = 0;
             rgb_owned_ = false;
             rgb_restore_pending_ = true;
         }

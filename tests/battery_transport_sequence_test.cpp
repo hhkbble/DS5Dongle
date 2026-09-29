@@ -341,7 +341,7 @@ void reset_lights_is_ordered_and_reasserted_when_it_lands_late() {
             "queued ResetLights remains an ordered host command");
     const auto gauge = transport.can_send(3, true);
     require(gauge.choice == DispatchChoice::Synthetic &&
-            (flags(gauge) & 0x10) && player(gauge) == 0x27,
+            (flags(gauge) & 0x10) && player(gauge) == 0x23,
             "accepted ResetLights is followed by renewed gauge output");
 
     require(transport.write_host(0x08, 0, 0, 0x42, 4),
