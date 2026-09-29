@@ -34,46 +34,36 @@ built with `CMAKE_BUILD_TYPE=Release` and is a separate UF2. Build with
 `cmake --build <build-dir> --target ds5-bridge` and inspect that directory's
 `ds5-bridge.uf2`. Do not substitute a UF2 from another board or configuration.
 
-The opt-in `DS5_PICO2W_EXPERIMENTAL_225MHZ` and
-`DS5_PICO2W_EXPERIMENTAL_300MHZ` options are Pico 2 W only, default off, and
-mutually exclusive. They select VREG 1.15 V with CYW43 PIO /3 or /4, boot2
-XIP /3 or /4, and RXDELAY 3 or 4, respectively. Leave both off for the standard
-150 MHz firmware. Keep these clock settings coupled. Check actual compile
-commands for `main.cpp`, the CYW43 driver, and `bs2_default` when changing
-them, and compare the standard UF2 against a same-toolchain baseline.
+The Pico 2 W 225/300 MHz experimental profiles are opt-in, default off, and
+unsupported. Keep their CPU, voltage, CYW43, and flash settings coupled; do
+not restore the retired 375 MHz profile or include experimental UF2s in a
+standard release. See [Experimental Pico 2 W clocks](docs/pico2w-experimental-clocks.md)
+for the exact settings, validation, electrical limits, and failure history.
 
-Run the native HID policy CTest in `tests/` and the Python configuration tool
-unittests in `tests/test_config_tool.py` when changing these paths. A successful
-test run, build, ELF or UF2 inspection, and a `picotool` report are bounded
-host/static/build evidence only. Record
-the source revision, dependency revisions, build options, artifact SHA-256,
-board, and complete check results. Device boot, pairing, audio behavior,
-stability, and game compatibility require explicit hardware tests. The
-225/300 MHz experimental overclocks are outside the RP2350 frequency
-specification. Evidence for both is limited to build/static checks; neither is
-hardware qualified. RP2350 datasheet sections 14.9.1, 14.9.5, and 14.9.6 give
-a 1.21 V DVDD absolute maximum, 1.16 V operating maximum, and +3% regulator
-deviation. At +3%, their nominal 1.15 V can reach 1.1845 V, above the
-operating maximum. Nominally preserved peripheral divisors do not establish
-hardware safety or reliable operation.
-
-The former 375 MHz / 1.20 V profile was retired after a user-reported no-boot
-test. The tested board and cause have not been established; preserve its
-[failure record](artifacts/oc375-failed-boot.json).
-Its nominal 1.20 V exceeds the operating limit, and +3% deviation can reach
-1.236 V, above the absolute maximum.
+Run all native CTests in `tests/` for firmware policy changes, and the Python
+unittests in `tests/test_config_tool.py` for configuration protocol or CLI
+changes. Record the source and dependency revisions, build options, board,
+artifact SHA-256, and complete check results. Builds, static inspection, host
+tests, and `picotool` output do not qualify device boot, pairing, audio,
+stability, actual host HID receive rate, or game behavior.
 
 ## Preserve firmware contracts
 
 The configuration protocol uses DualSense gamepad HID feature reports:
-`0xF6` writes settings or commands, `0xF7` reads the packed `Config_body`,
-`0xF8` reads the firmware version, and `0xF9` reads RSSI and audio state.
-Keep `src/cmd.cpp`, `src/config.h`, `src/config.cpp`, the report descriptors,
-and `tools/config_tool.py` aligned whenever report IDs, lengths, field order,
-validation, or schema version change. Flash-backed settings and BTstack's
-pairing storage are separate. Wake and keyboard behavior is compiled into the
-base firmware but enabled through runtime configuration; descriptor or USB
-re-enumeration changes need device checks.
+`0xF6` writes settings or commands, `0xF7` reads the 22-byte `Config_body`
+and an optional five-byte battery-feedback tail, `0xF8` reads the firmware
+version, and `0xF9` reads RSSI plus optional audio flags. Keep `src/cmd.cpp`,
+`src/config.h`, `src/config.cpp`, the report descriptors, `tools/config_tool.py`,
+and the paired Web configurator aligned whenever report IDs, lengths, field
+order, validation, or schema version change. Keep Config v5/22 bytes and the
+independently versioned battery extension compatible: old padded `0xF6/0x01`
+writes must not clear the extension; `0xF6/0x05` updates its RAM flag, and
+`0xF6/0x02` saves both records. Keep `0xF6/0x04` reserved; the current
+command handler does not implement it, so do not rely on the legacy
+`tools/reboot_bootsel.py` helper without device verification. Flash-backed
+settings and BTstack pairing storage are separate. Wake and keyboard
+behavior is compiled into the base firmware but enabled through runtime
+configuration; descriptor or USB re-enumeration changes need device checks.
 
 Runtime `polling_rate_mode` values 0 (250 Hz), 1 (500 Hz), and 2 (dirty
 Real-time) retain their existing behavior. Mode 3 uses a fixed 1 ms USB HID
@@ -81,13 +71,17 @@ cadence (endpoint interval) and queues the latest complete 63-byte
 Bluetooth-derived input state whenever the endpoint is ready. If no new
 Bluetooth report arrives, it repeats the same state, including sensor values
 and controller timestamp; do not fabricate fresh sensor samples or timestamps.
-Keep `Config_body` layout and configuration version 5 unchanged. Keep firmware
-validation, `tools/config_tool.py`, and the external web configurator aligned
-on mode 3. When Web/CLI changes the mode, use the Web reconnect action or
+When Web/CLI changes the mode, use the Web reconnect action or
 `python tools/config_tool.py reconnect` (both send `0xF6` function `0x03`),
-or instruct a physical replug so the host reads the new HID
-endpoint interval. Builds and static checks do not establish 1,000 actual host
-receives per second or improved gyro jitter; verify both on hardware.
+or instruct a physical replug so the host reads the new HID endpoint
+interval. Do not infer 1,000 actual host receives per second or improved gyro
+jitter from builds or endpoint metadata.
+
+Battery feedback consumes only genuine, complete Bluetooth battery reports
+from the current connection. Preserve raw-level confirmation by later real
+reports, immediate cancellation on charging or disable, and connected
+handback to the latest known host Player/RGB intent. The Pico onboard LED remains
+independent. Update the native battery tests when changing these rules.
 
 Core 0 services CYW43, TinyUSB, and the audio queues; it services the watchdog
 when enabled (the serial debug build disables it). Core 1
@@ -102,9 +96,6 @@ queue behavior, and actual audio output when changing those paths.
 
 The release workflow uploads three assets: the versioned standard UF2,
 `config_tool.py`, and `other board.zip` containing the Pico W and Waveshare
-UF2s. It excludes the debug UF2. For a local three-asset package, use the
-standard UF2, `config_tool.py`, and `other.board.zip` containing exactly those
-two other-board UF2s. Keep only 225/300 MHz UF2s in the active experimental
-output, outside the release directory, with their build provenance and an
-unverified-on-hardware label. Do not treat an artifact upload as a successful
-device qualification.
+UF2s. It excludes the debug and experimental UF2s. Keep experimental outputs
+separate with provenance and an unqualified label; an upload is not device
+qualification.
