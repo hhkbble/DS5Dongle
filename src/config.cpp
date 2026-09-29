@@ -3,6 +3,7 @@
 //
 
 #include "config.h"
+#include "hid_report_policy.h"
 
 #include <cmath>
 #include <cstring>
@@ -92,7 +93,7 @@ void config_valid() {
         body->disable_pico_led = 0;
         printf("[Config] disable_pico_led is invalid\n");
     }
-    if (body->polling_rate_mode > 2) {
+    if (!ds5_hid::valid_polling_rate_mode(body->polling_rate_mode)) {
         body->polling_rate_mode = 1;
         printf("[Config] polling_rate_mode is invalid\n");
     }

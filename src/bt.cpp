@@ -18,6 +18,7 @@
 #include "bsp/board_api.h"
 #include "classic/sdp_server.h"
 #include "config.h"
+#include "hid_report_policy.h"
 #include "status_gpio.h"
 #include "dse.h"
 #include "fake_ds5.h"
@@ -657,6 +658,7 @@ static void __not_in_flash_func(l2cap_packet_handler)(uint8_t packet_type, uint1
             bt_data_callback(INTERRUPT, packet, size);
 
             // 静默检测
+            if (!ds5_hid::bt_packet_has_button_prefix(size)) return;
             if (!(packet[2] & 1) || get_config().inactive_time == 0) {
                 return;
             }

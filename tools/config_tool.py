@@ -18,6 +18,7 @@ Examples:
   python config_tool.py get
   python config_tool.py set speaker_volume=90 enable_wake=1
   python config_tool.py set haptics_gain=1.5 --no-save
+  python config_tool.py reconnect
   python config_tool.py fields
 """
 import argparse
@@ -66,7 +67,7 @@ FIELDS = [
     ("speaker_gain",       "u8",    lambda v: 0 <= v <= 7,       "[0, 7]"),
     ("inactive_time",      "u8",    lambda v: 0 <= v <= 60,      "[0, 60] minutes (0 disable)"),
     ("disable_pico_led",   "u8",    lambda v: v in (0, 1),       "0/1"),
-    ("polling_rate_mode",  "u8",    lambda v: v in (0, 1, 2),    "0:250Hz 1:500Hz 2:real-time"),
+    ("polling_rate_mode",  "u8",    lambda v: v in (0, 1, 2, 3), "0:250Hz 1:500Hz 2:real-time 3:1000Hz fixed (USB reconnect required)"),
     ("audio_buffer_length","u8",    lambda v: 16 <= v <= 128,    "[16, 128]"),
     ("controller_mode",    "u8",    lambda v: v in (0, 1, 2),    "0:DS5 1:DSE 2:Auto"),
     ("enable_usb_sn",      "u8",    lambda v: v in (0, 1),       "0/1 (USB serial number)"),
@@ -219,6 +220,7 @@ def cmd_set(args):
     dev = open_device()
     try:
         cfg = read_config(dev)
+        previous_polling_rate = cfg["polling_rate_mode"]
         cfg.update(updates)
         write_config(dev, cfg, save=not args.no_save)
         new_cfg = read_config(dev)
@@ -233,6 +235,18 @@ def cmd_set(args):
         adjusted = abs(got - want) > 1e-6 if isinstance(want, float) else got != want
         if adjusted:
             print(f"  note: {name} was clamped by firmware to {fmt_value(name, got)}")
+    if "polling_rate_mode" in updates and new_cfg["polling_rate_mode"] != previous_polling_rate:
+        print("  note: USB interval changes after reconnect; run 'python tools/config_tool.py reconnect' or replug the dongle.")
+
+
+def cmd_reconnect(_args):
+    dev = open_device()
+    try:
+        report = bytes([REPORT_SET, FUNC_RECONNECT]).ljust(FEATURE_REPORT_LEN, b"\x00")
+        dev.send_feature_report(report)
+    finally:
+        dev.close()
+    print("USB reconnect requested.")
 
 
 def main():
@@ -241,6 +255,7 @@ def main():
 
     sub.add_parser("get", help="read and print the current config").set_defaults(func=cmd_get)
     sub.add_parser("fields", help="list configurable fields and ranges").set_defaults(func=cmd_fields)
+    sub.add_parser("reconnect", help="re-enumerate USB so polling interval changes take effect").set_defaults(func=cmd_reconnect)
 
     p_set = sub.add_parser("set", help="set one or more fields (name=value ...)")
     p_set.add_argument("assignments", nargs="+", metavar="name=value")
