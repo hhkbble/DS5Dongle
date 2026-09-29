@@ -36,10 +36,16 @@ struct __attribute__((packed)) Config {
     Config_body body;
 };
 
+static_assert(sizeof(Config_body) == 22);
+static_assert(sizeof(Config) == 32);
+
 void config_default();
 void config_load();
 bool config_save();
 Config_body& get_config();
+bool battery_feedback_enabled();
+void set_battery_feedback_enabled(bool enabled);
+uint8_t battery_feedback_save_status(); // 0: unconfirmed, 1: verified, 2: failed
 void set_config(const uint8_t *new_config, const uint16_t len);
 void config_valid();
 void set_config(const Config_body &new_config);

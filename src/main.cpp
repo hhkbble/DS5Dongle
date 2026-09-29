@@ -2,7 +2,9 @@
 // Created by awalol on 2026/3/4.
 //
 
+#include <array>
 #include <cstdio>
+#include <cstring>
 #include "bsp/board_api.h"
 #include "bt.h"
 #include "button_functions.h"
@@ -27,6 +29,7 @@
 #endif
 #include "config.h"
 #include "hid_report_policy.h"
+#include "battery_output_policy.h"
 #include "cmd.h"
 #include "dse.h"
 #include "status_gpio.h"
@@ -224,14 +227,18 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t rep
     (void) itf;
     (void) report_id;
     (void) report_type;
-    (void) buffer;
-    (void) bufsize;
+    if (buffer == nullptr || bufsize == 0) return;
 
     if (is_pico_cmd(report_id)) {
+        // USB stdio in the diagnostic log can service another control request,
+        // reusing TinyUSB's SET_REPORT buffer before the command reads it.
+        std::array<uint8_t, 64> command{};
+        if (bufsize > command.size()) return;
+        memcpy(command.data(), buffer, bufsize);
 #if ENABLE_VERBOSE
-        printf("[HID] Receive 0xf6 setting config, funcid:0x%02X\n", buffer[0]);
+        printf("[HID] Receive 0xf6 setting config, funcid:0x%02X\n", command[0]);
 #endif
-        pico_cmd_set(report_id, buffer, bufsize);
+        pico_cmd_set(report_id, command.data(), bufsize);
         return;
     }
 
@@ -239,13 +246,19 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t rep
     if (report_id == 0) {
         switch (buffer[0]) {
             case 0x02: {
+                std::array<uint8_t, ds5_battery::wire::kStateBytes> host_state{};
+                if (!ds5_battery::wire::copy_host_state(buffer, bufsize, host_state)) {
+                    return;
+                }
                 uint8_t outputData[78]{};
+                static_assert(bt_output_payload_fits(sizeof(outputData)));
                 outputData[0] = 0x31;
                 outputData[1] = reportSeqCounter << 4;
                 reportSeqCounter = (reportSeqCounter + 1) & 0x0F;
                 outputData[2] = 0x10;
                 SetStateData state{};
-                memcpy(&state,buffer + 1,sizeof(SetStateData));
+                static_assert(sizeof(SetStateData) == ds5_battery::wire::kStateBytes);
+                memcpy(&state, host_state.data(), sizeof(state));
 
                 const auto &config = get_config();
                 if (config.trigger_reduce > 0) {
@@ -270,7 +283,7 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t rep
                 }
 
                 memcpy(outputData + 3, &state, sizeof(SetStateData));
-                bt_write(outputData, sizeof(outputData));
+                bt_write(outputData, sizeof(outputData), BtOutputOrigin::HostState31);
 #if ENABLE_VERBOSE
                 printf_hexdump(outputData,sizeof(outputData));
 #endif
@@ -390,6 +403,7 @@ int main() {
 #endif
         cyw43_arch_poll();
         tud_task();
+        bt_battery_feedback_task();
         wake_task();
         audio_loop();
 #if ENABLE_DEBUG
